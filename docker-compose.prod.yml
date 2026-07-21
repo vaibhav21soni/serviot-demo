@@ -1,0 +1,14 @@
+# Production compose for the app server. Runs ONLY the API container; the
+# database is managed RDS (not a local container), so DB creds come from .env
+# pointing at the RDS endpoint. API is published to localhost only — the host
+# Nginx is the public entry point.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000" # localhost only; nginx proxies to it
+    restart: unless-stopped

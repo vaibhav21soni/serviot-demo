@@ -1,0 +1,30 @@
+# CI-only stack for the Test stage of the Jenkins pipeline.
+# Runs the ALREADY-BUILT image (passed as $IMAGE) against an ephemeral Postgres.
+# No Nginx — tests hit the app directly on :8000. Torn down with `down -v`.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: serviot
+      POSTGRES_USER: serviot
+      POSTGRES_PASSWORD: ci   # throwaway; this DB is destroyed after the run
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serviot -d serviot"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    image: ${IMAGE}
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: serviot
+      POSTGRES_USER: serviot
+      POSTGRES_PASSWORD: ci
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${CI_APP_PORT:-8000}:8000"   # exposed to the CI host so pytest can reach it
