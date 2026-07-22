@@ -44,10 +44,12 @@ pipeline {
 
     stage('Deploy') {
       steps {
-        sshagent(['app-ssh']) {
+        // Uses the 'app-ssh' credential (SSH Username with private key) via the
+        // built-in withCredentials binding — no SSH Agent plugin required.
+        withCredentials([sshUserPrivateKey(credentialsId: 'app-ssh', keyFileVariable: 'SSH_KEY')]) {
           sh '''
             tar czf - --exclude=.git --exclude=.env --exclude=.pytest_cache . \
-              | ssh -o StrictHostKeyChecking=no $APP_HOST \
+              | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $APP_HOST \
                 "mkdir -p $APP_DIR && tar xzf - -C $APP_DIR && \
                  cd $APP_DIR && sudo docker compose -f docker-compose.prod.yml up -d --build --force-recreate"
           '''
