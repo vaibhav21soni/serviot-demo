@@ -1,112 +1,59 @@
-# serviot-devices-api
+# CRUD API (serviot-devices-api)
 
-Small CRUD API over a `devices` table. FastAPI + PostgreSQL, fronted by Nginx.
-Built to exercise the **infrastructure and pipeline** around a service — the
-business logic (one CRUD resource) is intentionally trivial.
+A small FastAPI service over a `devices` table in Postgres. It's intentionally
+simple — the interesting part is the infra and pipeline around it, written up in
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
-- Application source: [`app/`](app/)
-- DB schema / migrations: [`migrations/`](migrations/)
-- Env template: [`.env.example`](.env.example)
-- Infra reasoning: [`DEPLOYMENT.md`](DEPLOYMENT.md)
-
-> **Scope note.** The assignment text mentions "both apps". Scope was set to a
-> single app + single database for this submission. `docker-compose.yml`
-> therefore brings up **app + database + Nginx**. `DEPLOYMENT.md` still covers
-> the multi-app topics (per-app pipelines, database separation) as design
-> reasoning so the decisions are on record.
-
-## Run locally (Docker — no manual steps beyond the .env)
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-Then:
-
-| What            | URL                              |
-|-----------------|----------------------------------|
-| API (via Nginx) | http://localhost:8080            |
-| Health          | http://localhost:8080/health     |
-| OpenAPI docs    | http://localhost:8080/docs       |
+Live: **https://crud.clothentic.in** · DB: `serviot_app1` on RDS.
 
 ## Endpoints
 
-| Method | Path             | Purpose                              |
-|--------|------------------|--------------------------------------|
-| GET    | `/health`        | App + DB health (200 / 503)          |
-| GET    | `/devices`       | List devices                         |
-| POST   | `/devices`       | Create device                        |
-| GET    | `/devices/{id}`  | Get one                              |
-| PUT    | `/devices/{id}`  | Update (partial)                     |
-| DELETE | `/devices/{id}`  | Delete                              |
+| Method | Path | |
+|--------|------|--|
+| GET | `/health` | app **and** DB health — 200 healthy / 503 if the DB is down |
+| GET | `/devices` | list |
+| POST | `/devices` | create |
+| GET | `/devices/{id}` | fetch one |
+| PUT | `/devices/{id}` | update |
+| DELETE | `/devices/{id}` | delete |
 
-### Quick check
+`/docs` has the interactive OpenAPI UI.
 
-```bash
-curl -s localhost:8080/health | jq
-curl -s -X POST localhost:8080/devices \
-  -H 'content-type: application/json' \
-  -d '{"name":"sensor-1","type":"temp","status":"online"}' | jq
-curl -s localhost:8080/devices | jq
-```
+## Run it locally
 
-## Health semantics
-
-`GET /health` returns `200` with `status: healthy` only when the app is serving
-**and** a `SELECT 1` through the pool succeeds. If the DB is unreachable it
-returns `503` with `status: unhealthy` so a load balancer / orchestrator drains
-the instance.
-
-## Tests
-
-Stdlib-only smoke tests against a running stack:
+Everything comes up with Docker; the only manual step is the env file.
 
 ```bash
-docker compose up -d
-BASE_URL=http://localhost:8080 pytest -q
+cp .env.example .env
+docker compose up --build      # api + Postgres + nginx
+curl localhost:8080/health
 ```
 
-## Data access — why raw SQL
+## How it's wired
 
-App 1 uses **raw, parameterized SQL** via `psycopg` (see [`app/crud.py`](app/crud.py))
-rather than an ORM. Justification:
+- **Config** is all environment (`app/config.py`) — same image everywhere, only
+  the injected env changes.
+- **Migrations** are plain SQL in `migrations/`, applied on startup and written
+  to be safe to re-run (`CREATE TABLE IF NOT EXISTS`). In production the pipeline
+  runs the same SQL.
+- **DB access** is raw parameterised SQL via psycopg (`app/crud.py`) — no ORM,
+  because one table doesn't need one, and every value is bound (no injection).
+- **Health** actually checks the database with `SELECT 1`, so a green `/health`
+  means the app *and* its DB are up — that's what the pipeline and load balancer
+  rely on.
 
-- The domain is one table with trivial queries — an ORM's mapping/session layer
-  is overhead with no payoff at this size.
-- Fewer dependencies and no query-generation indirection = a smaller image and
-  SQL that is exactly what runs.
-- **Injection is not a concern here:** every value is passed as a bound
-  parameter (`%s` placeholders + a values tuple); no string-built SQL anywhere.
-- Column list and table are hard-coded constants, never user input.
+## Files
 
-If this grew to many related tables with complex joins/relations, an ORM or
-query builder would earn its keep and the choice would flip.
+- `app/` — the service · `migrations/` — schema · `tests/` — smoke tests
+- `Dockerfile` — multi-stage, runs as non-root
+- `docker-compose.yml` — local dev (api + db + nginx)
+- `docker-compose.prod.yml` — production (api only, points at RDS)
+- `docker-compose.ci.yml` — ephemeral stack the pipeline tests against
+- `Jenkinsfile` — build → test → deploy → health check → auto-rollback
+- `deploy/nginx-app.conf` — the reverse-proxy block used on the server
 
-## Open ports
+## Pipeline in one line
 
-Every inbound port is listed and justified (unexplained ports are a finding).
-
-**Local (docker-compose):**
-
-| Port | Bound by | Exposure | Why |
-|------|----------|----------|-----|
-| `8080` (host, overridable via `NGINX_HOST_PORT`) | Nginx → `:80` | Public (host) | Only public entry point. All traffic enters here. |
-| `8000` | API (uvicorn) | Internal only (`expose`, not published) | App is reachable **only** from Nginx on the compose network, never from the host. |
-| `5432` | Postgres | Internal only (no `ports:`) | DB reachable only from the API container. Not published to the host. |
-
-**Production (design, per [`DEPLOYMENT.md`](DEPLOYMENT.md)):**
-
-| Port | Exposure | Why |
-|------|----------|-----|
-| `443` | Public | TLS entry at Nginx. |
-| `80` | Public | HTTP→HTTPS redirect only. |
-| `22` (SSH) | Restricted to a specific admin IP range | Ops access; never open to `0.0.0.0/0`. |
-| Jenkins port (non-default, **not** 8080) | Restricted | CI UI; not public. |
-| `5432` (managed DB) | Security group: app subnet only | DB accepts connections from the app tier only, never the internet. |
-
-## Migrations
-
-`migrations/*.sql` are idempotent (`IF NOT EXISTS`) and applied on startup, and
-are meant to be run as a dedicated pipeline step in real environments. See
-[`DEPLOYMENT.md`](DEPLOYMENT.md#5-database).
+Push to GitHub → Jenkins builds the image, runs the tests against a throwaway
+Postgres, ships it to the server, checks `/health`, and rolls back to the last
+good commit if the check fails.
