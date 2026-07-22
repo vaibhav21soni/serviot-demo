@@ -16,7 +16,7 @@ pipeline {
   environment {
     IMAGE    = "serviot-devices-api"
     APP_HOST = "ubuntu@10.20.0.135"   // app box PRIVATE IP (same VPC as Jenkins)
-    APP_DIR  = "/opt/serviot/devices-api"
+    APP_DIR  = "/home/ubuntu/serviot-demo"
   }
 
   stages {
@@ -51,7 +51,7 @@ pipeline {
             tar czf - --exclude=.git --exclude=.env --exclude=.pytest_cache . \
               | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $APP_HOST \
                 "mkdir -p $APP_DIR && tar xzf - -C $APP_DIR && \
-                 cd $APP_DIR && sudo docker compose -f docker-compose.prod.yml up -d --build --force-recreate"
+                 cd $APP_DIR && git pull origin main && sudo docker compose -f docker-compose.prod.yml up -d --build --force-recreate"
           '''
         }
       }
