@@ -1,12 +1,14 @@
-// Minimal CI/CD for App-1 (serviot-devices-api): build -> test -> deploy.
+// CI/CD for App-1 (serviot-devices-api): build -> test -> deploy (+ auto-rollback).
 //
 // Prereqs in Jenkins:
-//   - Docker available on the agent (the Jenkins box has it).
-//   - Credential 'app-ssh' = SSH Username with private key
-//       username: ubuntu, key: the serviot-key.pem for the app box.
+//   - Docker on the agent (Jenkins box has it).
+//   - Credential 'app-ssh' = SSH Username with private key (user ubuntu), the
+//     serviot-key.pem for the app box.
 //
-// Deploy target is the app EC2; code is shipped over SSH (tar), then the prod
-// compose rebuilds + restarts the container. .env on the box is left untouched.
+// Deploy is git-based: the box pulls the new commit, rebuilds via the prod
+// compose, then a health check runs. If /health isn't 200, the box resets to
+// the previous commit and redeploys — last-known-good rollback. .env on the box
+// (RDS creds) is gitignored and never touched.
 
 pipeline {
   agent any
@@ -16,7 +18,6 @@ pipeline {
   environment {
     IMAGE    = "serviot-devices-api"
     APP_HOST = "ubuntu@10.20.0.135"   // app box PRIVATE IP (same VPC as Jenkins)
-    APP_DIR  = "/home/ubuntu/serviot-demo"
   }
 
   stages {
@@ -44,14 +45,41 @@ pipeline {
 
     stage('Deploy') {
       steps {
-        // Uses the 'app-ssh' credential (SSH Username with private key) via the
-        // built-in withCredentials binding — no SSH Agent plugin required.
         withCredentials([sshUserPrivateKey(credentialsId: 'app-ssh', keyFileVariable: 'SSH_KEY')]) {
+          // The remote script is a quoted heredoc (<<'REMOTE') so nothing
+          // expands locally — the box runs it verbatim.
           sh '''
-            tar czf - --exclude=.git --exclude=.env --exclude=.pytest_cache . \
-              | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $APP_HOST \
-                "mkdir -p $APP_DIR && tar xzf - -C $APP_DIR && \
-                 cd $APP_DIR && git pull origin main && sudo docker compose -f docker-compose.prod.yml up -d --build --force-recreate"
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no $APP_HOST 'bash -s' <<'REMOTE'
+set -e
+APP_DIR=/home/ubuntu/serviot-demo
+HEALTH=http://127.0.0.1:8000/health
+cd "$APP_DIR"
+
+deploy() { sudo docker compose -f docker-compose.prod.yml up -d --build --force-recreate; }
+healthy() {
+  for i in $(seq 1 10); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH" || echo 000)
+    [ "$code" = "200" ] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+PREV=$(git rev-parse HEAD)
+git fetch origin main
+git reset --hard origin/main
+deploy
+
+if healthy; then
+  echo "deploy OK, healthy"
+else
+  echo "health check FAILED -> rolling back to $PREV"
+  git reset --hard "$PREV"
+  deploy
+  healthy && echo "rolled back to last-known-good" || echo "ROLLBACK ALSO UNHEALTHY"
+  exit 1
+fi
+REMOTE
           '''
         }
       }
@@ -60,6 +88,6 @@ pipeline {
 
   post {
     success { echo "Deployed build $BUILD_NUMBER to $APP_HOST" }
-    failure { echo "Pipeline failed at build $BUILD_NUMBER" }
+    failure { echo "Build $BUILD_NUMBER failed (rolled back if past deploy)" }
   }
 }
