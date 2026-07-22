@@ -15,7 +15,7 @@ pipeline {
 
   environment {
     IMAGE    = "serviot-devices-api"
-    APP_HOST = "ubuntu@100.56.97.79"
+    APP_HOST = "ubuntu@10.20.0.135"   // app box PRIVATE IP (same VPC as Jenkins)
     APP_DIR  = "/opt/serviot/devices-api"
   }
 
